@@ -1,3 +1,5 @@
+**English** | [Deutsch](README.de.md)
+
 # Reservation Automation
 
 A Python application that handles room and grill reservation requests sent by email. It reads unread messages from a mailbox, extracts the reservation details, checks whether the requested time is available, stores confirmed bookings in PostgreSQL, and replies to the sender.
