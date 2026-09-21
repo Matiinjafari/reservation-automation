@@ -1,0 +1,11 @@
+# secrets and local config
+.env
+
+# generated data (contains personal data)
+*.csv
+*.eml
+
+# python
+__pycache__/
+.pytest_cache/
+.venv/

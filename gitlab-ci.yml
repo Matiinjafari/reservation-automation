@@ -1,0 +1,51 @@
+stages:
+  - setup
+  - test
+  - update
+  - report
+
+# Run this manually when the database schema needs to be created.
+initialize-db:
+  stage: setup
+  image: postgres:15
+  script:
+    - psql "$DB_URL" -f scripts/init_db.sql
+  rules:
+    - if: '$CI_PIPELINE_SOURCE != "schedule"'
+      when: manual
+  allow_failure: true
+
+test:
+  stage: test
+  image: python:3.11
+  before_script:
+    - pip install -r requirements-dev.txt
+  script:
+    - pytest -q
+  rules:
+    - if: '$CI_PIPELINE_SOURCE != "schedule"'
+
+update-reservations:
+  stage: update
+  image: python:3.11
+  before_script:
+    - pip install -r requirements.txt
+    - test -n "$OPENAI_API_KEY" || { echo "OPENAI_API_KEY is not set"; exit 1; }
+  script:
+    - python scripts/update_reservations.py
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+
+export-reservations:
+  stage: report
+  image: python:3.11
+  before_script:
+    - pip install -r requirements.txt
+  script:
+    - python scripts/export_reservations.py
+  artifacts:
+    paths:
+      - reservations.csv
+    expire_in: 7 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
