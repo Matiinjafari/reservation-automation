@@ -1,85 +1,93 @@
 # Reservation Automation
 
-A Python tool that handles room and grill reservation requests sent by email. It reads the unread mails in a mailbox, works out what was requested, checks whether the slot is free, stores the booking in PostgreSQL and replies to the sender.
+A Python application that handles room and grill reservation requests sent by email. It reads unread messages from a mailbox, extracts the reservation details, checks whether the requested time is available, stores confirmed bookings in PostgreSQL, and replies to the sender.
 
-I built it for a residential building where residents book the common room and the grill by email. Requests arrive as free text, in different formats and often without a year, so the interesting part is turning those mails into clean data.
+I built it for a residential building where residents book the common room and grill by email. Requests arrive as free text, use different formats, and often omit the year. The main challenge is turning those messages into consistent reservation data.
 
-**Status:** prototype. Sending real emails is switched off by default (see [Sending emails](#sending-emails)).
+**Status:** Prototype. Sending real emails is disabled by default. See [Sending emails](#sending-emails).
 
 ## How it works
 
-```
+```text
 unread email (IMAP)
-      │
-      ├─ subject looks like a "special request"? ──► forward to admins, stop
-      │
-      ▼
+      |
+      +-- special request? --> forward to admins and stop
+      |
+      v
   parse the body
-      ├─ 1. LLM extraction (OpenAI function calling, validated with Pydantic)
-      └─ 2. regex fallback on labelled lines ("Date:", "Time:", ...) if step 1 fails
-      │
-      ▼
+      +-- LLM extraction using function calling and Pydantic validation
+      +-- labelled-field fallback if the LLM step fails
+      |
+      v
   slot already booked for this resource?
-      ├─ no  ─► save reservation, send confirmation
-      └─ yes ─► send rejection
-      │
-      ▼
-  every attempt is written to reservation_logs (confirmed / denied / failed)
+      +-- no  --> save reservation, send confirmation, log as confirmed
+      +-- yes --> send rejection, log as denied
+
+  parsing errors are logged as failed
 ```
 
-Some details that took a bit of care:
+Special requests are forwarded directly to the admins and are not written to `reservation_logs`.
 
-- **Dates and times.** ISO dates are trusted as they are, everything else is read day-first. `9pm`, `9:30 pm`, `21` and `24:00` all work. If the email contains no four-digit year, the current year is used.
-- **Negations.** "No grill" must not book the grill, so the grill and kitchen flags come from a small negation-aware check instead of trusting the model alone.
-- **Room numbers.** The model is told that `room` is the sender's own apartment number, not the facility. If it returns "common room" anyway, the number is read from the text instead.
-- **Resource.** The subject line decides between grill and common room. Without a hint in the subject, a grill request in the body means grill, everything else means common room.
-- **Deposit.** Common room: 50, plus 50 if the kitchen is requested. Grill: none. The amounts are constants in `scripts/parsing.py`.
-- **Availability.** Two bookings of the same resource on the same day conflict if their time ranges overlap; back-to-back bookings (one ends at 18:00, the next starts at 18:00) do not.
+Some parts of the parsing require a little extra handling:
+
+- **Dates and times:** ISO dates are accepted directly. Other dates are interpreted in day-month-year order. Times such as `9pm`, `9:30 pm`, `21`, and `24:00` are supported. If the email does not contain a four-digit year, the current year is used.
+- **Negations:** Phrases such as "no grill" must not create a grill reservation. The grill flag is therefore determined by a small negation-aware text check. The kitchen is considered requested if either the text check or the model detects a request.
+- **Room numbers:** The `room` field refers to the sender's apartment number, not the requested facility. If the model returns a value such as "common room", the application tries to read the apartment number from the email instead.
+- **Resource selection:** The subject line is used to choose between the grill and common room. If the subject gives no indication, an explicit grill request in the body selects the grill; otherwise the common room is used.
+- **Deposit:** The common-room deposit is 50, with another 50 added when the kitchen is requested. Grill reservations do not require a deposit. These amounts are defined in `scripts/parsing.py`.
+- **Availability:** Reservations for the same resource and date conflict when their time ranges overlap. Back-to-back bookings are allowed, so one booking may end when the next begins.
 
 ## Project layout
 
-```
+```text
 scripts/
-  update_reservations.py   main job: read mail, parse, book, reply
-  export_reservations.py   export all reservations to CSV and email it to the admins
-  parsing.py               date, time, room, negation and deposit helpers (no I/O)
-  mailer.py                SMTP helper with a dry-run default
-  init_db.sql              table definitions
+  update_reservations.py   reads emails, processes requests and sends replies
+  export_reservations.py   exports reservations to CSV and emails the file to admins
+  parsing.py               parsing and deposit helpers without network or database access
+  mailer.py                shared SMTP helper with email sending disabled by default
+  init_db.sql              database table definitions
 tests/
-  test_reservations.py     unit tests for the parsing and email-to-reservation logic
-.gitlab-ci.yml             test job plus the scheduled update and export jobs
+  test_reservations.py     tests for parsing and email-to-reservation conversion
+.gitlab-ci.yml             test, scheduled update and export jobs
 ```
 
 ## Setup
 
-You need Python 3.11, a PostgreSQL database, an IMAP/SMTP mailbox and an OpenAI API key.
+The application requires Python 3.11, PostgreSQL, an IMAP/SMTP mailbox, and an OpenAI API key.
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-cp .env.example .env        # then fill in your own values
+cp .env.example .env
+# Add your own values to .env, then load them:
 export $(grep -v '^#' .env | xargs)
 
 psql "$DB_URL" -f scripts/init_db.sql
 python scripts/update_reservations.py
 ```
 
-Configuration is read from environment variables only. `.env.example` lists all of them. Never commit your real `.env`.
+Configuration is read from environment variables. `.env.example` lists the required values. Do not commit a real `.env` file.
 
 ### Database
 
 `scripts/init_db.sql` creates two tables:
 
-- `reservations`: the confirmed bookings
-- `reservation_logs`: one row per processed request, with its status
-
-The file was reconstructed from the queries in the scripts, so check the column types against your own database before you rely on it.
+- `reservations` contains confirmed bookings.
+- `reservation_logs` records regular requests with the status `confirmed`, `denied`, or `failed`.
 
 ### Sending emails
 
-By default the scripts only log what they would send. Set `SEND_EMAILS=true` to send real confirmations, rejections, admin forwards and the CSV export. This applies to both scripts.
+Outgoing email is disabled by default. In this mode, messages are skipped and their subjects are written to the log.
+
+Set the following variable to enable confirmation emails, rejection emails, admin forwards, and CSV exports:
+
+```bash
+SEND_EMAILS=true
+```
+
+This setting is shared by both email-processing scripts.
 
 ## Tests
 
@@ -88,9 +96,9 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-The tests cover the parsing helpers and the email-to-reservation step, including the regex fallback and the negation handling. The LLM call and the database are not part of the tests: the LLM is replaced by a stub, and the SQL queries have to be tried against a real database.
+The tests cover the parsing helpers and the conversion from an email to a reservation, including the labelled-field fallback and negation handling. The LLM call is replaced with a stub, and the database queries are not executed by the test suite.
 
-Example of what the fallback parser returns for a labelled request:
+Example request handled by the fallback parser:
 
 ```text
 Subject: Common room reservation
@@ -103,6 +111,8 @@ Reason: Birthday
 Guests: 12
 We would also like to use the kitchen.
 ```
+
+The resulting reservation data is:
 
 ```json
 {
@@ -122,25 +132,26 @@ We would also like to use the kitchen.
 
 ## CI/CD
 
-The pipeline is written for GitLab CI/CD and does not run on GitHub.
+The project uses GitLab CI/CD.
 
-| Job | When | What it does |
+| Job | When | Purpose |
 | --- | --- | --- |
-| `initialize-db` | manual | creates the tables from `scripts/init_db.sql` |
-| `test` | pushes and merge requests | runs `pytest` |
-| `update-reservations` | scheduled pipeline | processes the unread mails |
-| `export-reservations` | scheduled pipeline | writes `reservations.csv`, keeps it as a job artifact and emails it to the admins |
+| `initialize-db` | manually in a non-scheduled pipeline | creates the tables from `scripts/init_db.sql` |
+| `test` | every non-scheduled pipeline | runs the test suite with `pytest` |
+| `update-reservations` | scheduled pipeline | processes unread reservation emails |
+| `export-reservations` | scheduled pipeline | creates `reservations.csv`, stores it as a job artifact, and emails it to the admins when email sending is enabled |
 
-Set the variables from `.env.example` as masked CI/CD variables and create a pipeline schedule for the two scheduled jobs. After editing `.gitlab-ci.yml`, check it with the CI lint in GitLab's pipeline editor.
+Add the values from `.env.example` as masked CI/CD variables and create a pipeline schedule for the update and export jobs. GitLab's CI lint can be used to validate changes to `.gitlab-ci.yml`.
 
 ## Limitations
 
-- Negation handling is heuristic. "No grill" and "grill not required" are recognised, but unusual phrasings may not be.
-- The regex fallback needs labelled lines (`Date:`, `Time:`). It is only a safety net for when the LLM call fails.
-- The model name is configurable (`OPENAI_MODEL`, default `gpt-3.5-turbo`). Results depend on the model, so a stricter model is worth trying if extraction is unreliable.
-- Only the first `text/plain` part of an email is read; HTML-only mails are not handled.
-- One mailbox, two resources (`common_room`, `grill`). Adding another resource means extending the subject rules and the deposit logic.
+- Negation handling is heuristic. Common expressions such as "no grill" and "grill not required" are recognised, but unusual phrasing may be missed.
+- The fallback parser expects labelled fields such as `Date:` and `Time:`. It is intended only as a backup when LLM extraction fails.
+- The model can be configured with `OPENAI_MODEL`; its default is `gpt-3.5-turbo`. Extraction quality may differ between models.
+- Only the first `text/plain` part of a message is read. HTML-only emails are not supported.
+- The application handles one mailbox and two resources: `common_room` and `grill`. Supporting another resource requires changes to the subject rules and deposit calculation.
+- Availability is checked before insertion without a database-level exclusion constraint. Two processes handling overlapping requests at exactly the same time could therefore create conflicting bookings.
 
 ## Privacy
 
-The database and the CSV export contain names, email addresses, phone numbers and room numbers of residents. Keep the database and the CI/CD project private, and do not commit exports, `.env` files or real emails. The tests only use made-up data.
+The database and CSV export contain residents' names, email addresses, phone numbers, and room numbers. Keep the database and CI/CD project private. Do not commit CSV exports, `.env` files, or real emails. The test suite uses fictional data only.
